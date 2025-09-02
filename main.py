@@ -166,3 +166,235 @@ def predict_trend(sentiment_score: float, price_history: pd.DataFrame | None = N
     if combined < 0:
         return "Down 📉"
     return "Stable ↔️"
+
+
+def _compute_indicators(price_history: pd.DataFrame) -> pd.DataFrame:
+    """Compute SMA20/50, RSI14, MACD(12,26,9), ATR14. Returns new DataFrame."""
+    df = price_history.copy()
+    if df.empty:
+        return df
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+
+    # SMA
+    df['SMA20'] = close.rolling(20).mean()
+    df['SMA50'] = close.rolling(50).mean()
+
+    # RSI14 (Wilder's)
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df['RSI14'] = 100 - (100 / (1 + rs))
+
+    # MACD
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    df['MACD'] = macd
+    df['MACD_SIGNAL'] = signal
+
+    # ATR14
+    prev_close = close.shift(1)
+    tr = np.maximum.reduce([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ])
+    df['ATR14'] = pd.Series(tr, index=df.index).rolling(14).mean()
+    return df
+
+
+def advanced_predict_trend(sentiment_score: float, price_history: pd.DataFrame | None) -> dict:
+    """Rule-based ensemble using sentiment + indicators. Returns direction, confidence, and explanations.
+
+    Signals considered:
+    - Sentiment: >0.4 bullish, <-0.4 bearish, else neutral
+    - SMA20 vs SMA50: above bullish, below bearish
+    - MACD above signal bullish; below bearish
+    - RSI14: <30 oversold (bullish), >70 overbought (bearish)
+    - Price vs SMA20 momentum
+    Confidence scales with number and strength of aligned signals.
+    """
+    if price_history is None or not isinstance(price_history, pd.DataFrame) or price_history.empty:
+        # fallback to simple predictor
+        return {
+            'direction': predict_trend(sentiment_score),
+            'confidence': 50,
+            'signals': ['Fallback: insufficient price history']
+        }
+
+    df = _compute_indicators(price_history)
+    last = df.iloc[-1]
+    signals: list[str] = []
+    score = 0
+
+    # Sentiment
+    if sentiment_score > 0.8:
+        score += 2; signals.append('Strong positive news sentiment')
+    elif sentiment_score > 0.4:
+        score += 1; signals.append('Positive news sentiment')
+    elif sentiment_score < -0.8:
+        score -= 2; signals.append('Strong negative news sentiment')
+    elif sentiment_score < -0.4:
+        score -= 1; signals.append('Negative news sentiment')
+    else:
+        signals.append('Neutral/mixed news sentiment')
+
+    # SMA20 vs SMA50
+    if pd.notna(last.get('SMA20')) and pd.notna(last.get('SMA50')) and pd.notna(last.get('Close')):
+        if last['SMA20'] > last['SMA50'] and last['Close'] > last['SMA20']:
+            score += 1; signals.append('Bullish: price above SMA20 and SMA20>SMA50')
+        elif last['SMA20'] < last['SMA50'] and last['Close'] < last['SMA20']:
+            score -= 1; signals.append('Bearish: price below SMA20 and SMA20<SMA50')
+
+    # MACD
+    if pd.notna(last.get('MACD')) and pd.notna(last.get('MACD_SIGNAL')):
+        if last['MACD'] > last['MACD_SIGNAL']:
+            score += 1; signals.append('MACD above signal (bullish)')
+        elif last['MACD'] < last['MACD_SIGNAL']:
+            score -= 1; signals.append('MACD below signal (bearish)')
+
+    # RSI extremes
+    if pd.notna(last.get('RSI14')):
+        if last['RSI14'] < 30:
+            score += 1; signals.append('RSI oversold (<30)')
+        elif last['RSI14'] > 70:
+            score -= 1; signals.append('RSI overbought (>70)')
+
+    # Volatility awareness (ATR relative to price)
+    if pd.notna(last.get('ATR14')) and pd.notna(last.get('Close')) and last['Close'] > 0:
+        vol = float(last['ATR14'] / last['Close'])
+        if vol > 0.04:
+            signals.append('High volatility: reduce confidence')
+            # dampen score magnitude
+            score = np.sign(score) * max(0, abs(score) - 1)
+
+    # Map score to direction
+    if score > 0:
+        direction = 'Up 📈'
+    elif score < 0:
+        direction = 'Down 📉'
+    else:
+        direction = 'Stable ↔️'
+
+    # Confidence from |score|
+    base_conf = {0: 40, 1: 60, 2: 75, 3: 85, 4: 92}.get(int(abs(score)), 95)
+    confidence = int(base_conf)
+    return {'direction': direction, 'confidence': confidence, 'signals': signals}
+
+
+def _safe_div(numerator: float | int | None, denominator: float | int | None) -> float | None:
+    try:
+        if numerator is None or denominator in (None, 0):
+            return None
+        return float(numerator) / float(denominator)
+    except Exception:
+        return None
+
+
+def get_fundamentals(ticker: str) -> dict:
+    """Fetch fundamentals and compute basic valuation/quality ratios.
+
+    Returns dict with keys: 'ratios', 'income_statement', 'balance_sheet', 'cash_flow', 'meta'.
+    DataFrames are pandas objects suitable for display.
+    """
+    try:
+        resolved = _resolve_ticker_symbol(ticker)
+        t = yf.Ticker(resolved)
+
+        # Core statements (annual)
+        income = getattr(t, 'financials', pd.DataFrame())
+        balance = getattr(t, 'balance_sheet', pd.DataFrame())
+        cash = getattr(t, 'cashflow', pd.DataFrame())
+
+        # Prefer most recent column
+        def latest_value(df: pd.DataFrame, row_name: str) -> float | None:
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                return None
+            if row_name not in df.index:
+                return None
+            series = df.loc[row_name]
+            if isinstance(series, pd.Series) and not series.empty:
+                return float(series.iloc[0])
+            return None
+
+        # Prices / market data
+        fast = getattr(t, 'fast_info', None)
+        last_price = None
+        market_cap = None
+        if fast is not None:
+            last_price = getattr(fast, 'last_price', None)
+            market_cap = getattr(fast, 'market_cap', None)
+
+        # Shares outstanding (approx)
+        shares = None
+        if market_cap and last_price and last_price != 0:
+            shares = float(market_cap) / float(last_price)
+
+        # Key line items
+        revenue = latest_value(income, 'Total Revenue') or latest_value(income, 'Revenue')
+        net_income = latest_value(income, 'Net Income') or latest_value(income, 'Net Income Common Stockholders')
+        ebit = latest_value(income, 'Ebit') or latest_value(income, 'Operating Income')
+        gross_profit = latest_value(income, 'Gross Profit')
+
+        total_assets = latest_value(balance, 'Total Assets')
+        total_liab = latest_value(balance, 'Total Liabilities Net Minority Interest') or latest_value(balance, 'Total Liab')
+        total_equity = latest_value(balance, "Total Stockholder Equity") or (None if total_assets is None or total_liab is None else float(total_assets) - float(total_liab))
+        current_assets = latest_value(balance, 'Total Current Assets')
+        current_liab = latest_value(balance, 'Total Current Liabilities')
+        total_debt = latest_value(balance, 'Total Debt') or latest_value(balance, 'Short Long Term Debt')
+
+        cfo = latest_value(cash, 'Total Cash From Operating Activities') or latest_value(cash, 'Operating Cash Flow')
+        capex = latest_value(cash, 'Capital Expenditures')
+        fcf = None if cfo is None or capex is None else float(cfo) - float(capex)
+
+        # Ratios
+        pe = _safe_div(last_price, _safe_div(net_income, shares)) if last_price and shares and net_income else None
+        ps = _safe_div(market_cap, revenue) if market_cap and revenue else None
+        pb = _safe_div(market_cap, total_equity) if market_cap and total_equity else None
+        roe = _safe_div(net_income, total_equity)
+        roa = _safe_div(net_income, total_assets)
+        debt_to_equity = _safe_div(total_debt, total_equity)
+        current_ratio = _safe_div(current_assets, current_liab)
+        ebit_margin = _safe_div(ebit, revenue)
+        net_margin = _safe_div(net_income, revenue)
+        fcf_margin = _safe_div(fcf, revenue) if fcf is not None else None
+
+        ratios = {
+            'Price': last_price,
+            'Market Cap': market_cap,
+            'P/E': pe,
+            'P/S': ps,
+            'P/B': pb,
+            'ROE': roe,
+            'ROA': roa,
+            'Debt/Equity': debt_to_equity,
+            'Current Ratio': current_ratio,
+            'EBIT Margin': ebit_margin,
+            'Net Margin': net_margin,
+            'FCF Margin': fcf_margin,
+        }
+
+        # Tidy DataFrames for display: transpose so dates as rows
+        def tidy(df: pd.DataFrame) -> pd.DataFrame:
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                return pd.DataFrame()
+            tdf = df.copy()
+            tdf = tdf.T
+            tdf.index.name = 'Period'
+            return tdf
+
+        return {
+            'ratios': ratios,
+            'income_statement': tidy(income),
+            'balance_sheet': tidy(balance),
+            'cash_flow': tidy(cash),
+            'meta': {'resolved_symbol': resolved}
+        }
+    except Exception as e:
+        return {'error': f'Error fetching fundamentals: {e}'}
