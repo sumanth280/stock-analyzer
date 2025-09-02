@@ -320,10 +320,11 @@ def _compute_indicators(price_history: pd.DataFrame) -> pd.DataFrame:
     high = df['High']
     low = df['Low']
 
-    # SMA
-    df['SMA20'] = close.rolling(20).mean()
-    df['SMA50'] = close.rolling(50).mean()
-    df['SMA200'] = close.rolling(200).mean()
+    # SMA (use strict min_periods to avoid early noise)
+    df['SMA20'] = close.rolling(window=20, min_periods=20).mean()
+    df['SMA50'] = close.rolling(window=50, min_periods=50).mean()
+    df['SMA100'] = close.rolling(window=100, min_periods=100).mean()
+    df['SMA200'] = close.rolling(window=200, min_periods=200).mean()
 
     # RSI14 (Wilder's)
     delta = close.diff()
@@ -445,6 +446,7 @@ def get_trend_labels(price_history: pd.DataFrame) -> dict:
     short = 'Unknown'
     long = 'Unknown'
     try:
+        # Short-term based on 20/50
         if pd.notna(last.get('Close')) and pd.notna(last.get('SMA20')) and pd.notna(last.get('SMA50')):
             if last['Close'] > last['SMA20'] and last['SMA20'] > last['SMA50']:
                 short = 'Uptrend'
@@ -452,13 +454,36 @@ def get_trend_labels(price_history: pd.DataFrame) -> dict:
                 short = 'Downtrend'
             else:
                 short = 'Sideways'
-        if pd.notna(last.get('SMA50')) and pd.notna(last.get('SMA200')):
-            if last['SMA50'] > last['SMA200']:
+
+        # Long-term preference: 50 vs 200, else 50 vs 100, else slope of 50
+        sma50 = last.get('SMA50')
+        sma100 = last.get('SMA100')
+        sma200 = last.get('SMA200')
+        if pd.notna(sma50) and pd.notna(sma200):
+            if sma50 > sma200:
                 long = 'Uptrend'
-            elif last['SMA50'] < last['SMA200']:
+            elif sma50 < sma200:
                 long = 'Downtrend'
             else:
                 long = 'Sideways'
+        elif pd.notna(sma50) and pd.notna(sma100):
+            if sma50 > sma100:
+                long = 'Uptrend'
+            elif sma50 < sma100:
+                long = 'Downtrend'
+            else:
+                long = 'Sideways'
+        elif pd.notna(sma50):
+            # Slope of SMA50 over last 5 days as fallback
+            tail = df['SMA50'].dropna().tail(6)
+            if len(tail) >= 2:
+                slope = float(tail.iloc[-1] - tail.iloc[0])
+                if slope > 0:
+                    long = 'Uptrend'
+                elif slope < 0:
+                    long = 'Downtrend'
+                else:
+                    long = 'Sideways'
     except Exception:
         pass
     return {'short_term': short, 'long_term': long}
