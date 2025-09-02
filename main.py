@@ -3,6 +3,8 @@ import numpy as np
 import yfinance as yf
 from transformers import pipeline
 from functools import lru_cache
+import requests
+import feedparser
 
 @lru_cache(maxsize=1)
 def _get_sentiment_pipeline():
@@ -42,19 +44,33 @@ def get_stock_data(ticker: str, period: str = "3mo"):
         return f"Error fetching stock data: {e}"
 
 def get_financial_news(ticker: str):
-    """Fetch recent news titles using yfinance's Ticker.news if available."""
+    """Fetch recent news titles. Try yfinance news; fallback to Google News RSS."""
     try:
         resolved = _resolve_ticker_symbol(ticker)
         stock = yf.Ticker(resolved)
         news_items = getattr(stock, 'news', None)
-        if not news_items:
-            return []
-        titles = []
-        for item in news_items:
-            title = item.get('title')
-            if title:
-                titles.append(title.strip())
-        return titles[:25]
+        titles: list[str] = []
+        if news_items:
+            for item in news_items:
+                title = item.get('title')
+                if title:
+                    titles.append(title.strip())
+        # Fallback to Google News RSS if not enough headlines
+        if len(titles) < 5:
+            query = f"{ticker} stock OR shares OR results"
+            url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}+when:7d&hl=en-IN&gl=IN&ceid=IN:en"
+            feed = feedparser.parse(url)
+            for entry in feed.entries:
+                if getattr(entry, 'title', None):
+                    titles.append(entry.title.strip())
+        # Deduplicate while preserving order
+        seen = set()
+        unique_titles = []
+        for t in titles:
+            if t not in seen:
+                seen.add(t)
+                unique_titles.append(t)
+        return unique_titles[:30]
     except Exception as e:
         return f"Error fetching news: {e}"
 
@@ -85,6 +101,44 @@ def analyze_sentiment(text_list):
         final_label = 'Neutral'
 
     return {'sentiment_score': sentiment_score, 'label': final_label}
+
+
+def analyze_sentiment_detailed(text_list: list[str]):
+    """Return per-headline sentiment results and overall aggregate."""
+    if not text_list:
+        return {
+            'items': [],
+            'aggregate': {'sentiment_score': 0.0, 'label': 'Neutral'}
+        }
+    nlp = _get_sentiment_pipeline()
+    results = nlp(list(text_list))
+
+    detailed = []
+    positive_score = 0.0
+    negative_score = 0.0
+    for headline, r in zip(text_list, results):
+        label = r['label'].upper()
+        score = float(r['score'])
+        detailed.append({'headline': headline, 'label': label, 'score': score})
+        if label == 'POSITIVE':
+            positive_score += score
+        elif label == 'NEGATIVE':
+            negative_score += score
+    sentiment_score = float(positive_score - negative_score)
+    if sentiment_score > 1.0:
+        final_label = 'Strongly Positive'
+    elif sentiment_score > 0.2:
+        final_label = 'Positive'
+    elif sentiment_score < -1.0:
+        final_label = 'Strongly Negative'
+    elif sentiment_score < -0.2:
+        final_label = 'Negative'
+    else:
+        final_label = 'Neutral'
+    return {
+        'items': detailed,
+        'aggregate': {'sentiment_score': sentiment_score, 'label': final_label}
+    }
 
 def predict_trend(sentiment_score: float, price_history: pd.DataFrame | None = None) -> str:
     """Combine news sentiment with simple momentum for a short-term direction signal.

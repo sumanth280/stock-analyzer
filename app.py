@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from main import get_financial_news, get_stock_data, analyze_sentiment, predict_trend
+from main import get_financial_news, get_stock_data, analyze_sentiment, analyze_sentiment_detailed, predict_trend
 
 st.title('AI News Sentiment & Stock Predictor')
 
@@ -9,8 +9,17 @@ st.markdown("""
 This app analyzes recent financial news sentiment (FinBERT) and combines it with simple price momentum to estimate a short‑term direction. Works for U.S. and Indian stocks (try NSE symbols like RELIANCE or TCS).
 """)
 
+@st.cache_data(show_spinner=False, ttl=600)
+def cached_news(t: str):
+    return get_financial_news(t)
+
+@st.cache_data(show_spinner=False, ttl=600)
+def cached_prices(t: str, p: str):
+    return get_stock_data(ticker=t, period=p)
+
 # User input for the stock ticker
 ticker = st.text_input('Enter a stock ticker (e.g., AAPL, RELIANCE, TCS)', 'RELIANCE').upper()
+period = st.selectbox('History period', ['1mo','3mo','6mo','1y'], index=1)
 
 if st.button('Analyze'):
     if not ticker:
@@ -21,7 +30,7 @@ if st.button('Analyze'):
         
         # 1. Get News
         st.info('Fetching recent financial news...')
-        news_headlines = get_financial_news(ticker)
+        news_headlines = cached_news(ticker)
         if isinstance(news_headlines, str):
             st.error(news_headlines)
         elif not news_headlines:
@@ -33,7 +42,8 @@ if st.button('Analyze'):
             
             # 2. Analyze Sentiment
             st.info('Running FinBERT sentiment analysis...')
-            sentiment_results = analyze_sentiment(news_headlines)
+            detailed = analyze_sentiment_detailed(news_headlines)
+            sentiment_results = detailed['aggregate']
             
             st.write('---')
             st.subheader('Sentiment Analysis Results')
@@ -43,21 +53,29 @@ if st.button('Analyze'):
             st.write('---')
             st.subheader('Short-Term Trend Prediction')
             # Fetch history first for momentum-aware prediction
-            stock_data_for_pred = get_stock_data(ticker)
+            stock_data_for_pred = cached_prices(ticker, period)
             if isinstance(stock_data_for_pred, str):
                 predicted_trend = predict_trend(sentiment_results['sentiment_score'])
             else:
                 predicted_trend = predict_trend(sentiment_results['sentiment_score'], stock_data_for_pred)
             st.success(f"Based on recent news sentiment, the predicted trend is: {predicted_trend}")
+
+            # Per-headline table
+            with st.expander('Per-headline sentiment details'):
+                if isinstance(detailed, dict) and 'items' in detailed:
+                    details_df = pd.DataFrame(detailed['items'])
+                    if not details_df.empty:
+                        details_df = details_df.rename(columns={'label': 'Label', 'score': 'Score', 'headline': 'Headline'})
+                        st.dataframe(details_df[['Headline','Label','Score']], use_container_width=True, height=400)
             
             # 4. Get Stock Data and Plot
             st.info('Fetching historical stock data...')
-            stock_data = get_stock_data(ticker)
+            stock_data = cached_prices(ticker, period)
             if isinstance(stock_data, str):
                 st.error(stock_data)
             else:
                 st.write('---')
-                st.subheader('Candlestick Chart (Last 3 Months)')
+                st.subheader(f'Candlestick Chart ({period})')
                 fig = go.Figure(data=[go.Candlestick(
                     x=stock_data.index,
                     open=stock_data['Open'],
