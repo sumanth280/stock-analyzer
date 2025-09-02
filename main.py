@@ -541,3 +541,47 @@ def get_fundamentals(ticker: str) -> dict:
         }
     except Exception as e:
         return {'error': f'Error fetching fundamentals: {e}'}
+
+
+def get_current_price(ticker: str) -> float | None:
+    """Return the latest trade price using fast_info; fallback to last close."""
+    try:
+        resolved = _resolve_ticker_symbol(ticker)
+        t = yf.Ticker(resolved)
+        last = None
+        fast = getattr(t, 'fast_info', None)
+        if fast is not None:
+            last = getattr(fast, 'last_price', None)
+        if last is None:
+            hist = t.history(period="5d", interval="1d")
+            if isinstance(hist, pd.DataFrame) and not hist.empty and 'Close' in hist.columns:
+                last = float(hist['Close'].iloc[-1])
+        return float(last) if last is not None else None
+    except Exception:
+        return None
+
+
+def compute_uptrend_levels(price_history: pd.DataFrame) -> dict:
+    """Compute heuristic uptrend trigger and near-term target.
+
+    - Trigger: breakout above last 20-day high + 0.5% buffer
+    - Near-term target: last close + 1 * ATR14 (momentum extension)
+    """
+    if not isinstance(price_history, pd.DataFrame) or price_history.empty:
+        return {'error': 'No price history'}
+    df = _compute_indicators(price_history)
+    closes = df['Close'].dropna()
+    if len(closes) < 21:
+        return {'error': 'Not enough history for levels'}
+    last_close = float(closes.iloc[-1])
+    last_high20 = float(df['High'].rolling(20).max().iloc[-2]) if 'High' in df.columns else float(closes.rolling(20).max().iloc[-2])
+    trigger = last_high20 * 1.005
+    atr = None
+    if 'ATR14' in df.columns and pd.notna(df['ATR14'].iloc[-1]):
+        atr = float(df['ATR14'].iloc[-1])
+    target = last_close + (atr if atr is not None else 0.03 * last_close)
+    return {
+        'last_close': last_close,
+        'trigger_price': trigger,
+        'near_term_target': target
+    }
