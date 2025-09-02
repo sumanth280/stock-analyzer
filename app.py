@@ -104,11 +104,20 @@ with tab_overview:
         if 'error' in data:
             st.warning(data['error'])
         elif data:
-            news_df = pd.DataFrame(data['news'], columns=['Headline'])
-            st.write('Recent News Headlines:')
-            st.dataframe(news_df, use_container_width=True)
+            # Price and trends at top
+            price = data.get('price')
+            if isinstance(price, pd.DataFrame) and not price.empty:
+                try:
+                    from main import get_current_price, get_trend_labels
+                    last_close = float(price['Close'].iloc[-1])
+                    trends = get_trend_labels(price)
+                    c0, c1, c2 = st.columns(3)
+                    c0.metric('Current Price', f"{last_close:.2f}")
+                    c1.metric('Short-term Trend', trends.get('short_term', 'Unknown'))
+                    c2.metric('Long-term Trend', trends.get('long_term', 'Unknown'))
+                except Exception:
+                    pass
 
-            st.write('---')
             st.markdown('<div class="section-title">🧠 Sentiment Analysis</div>', unsafe_allow_html=True)
             sres = data['sentiment']
             st.metric(label="Overall Sentiment", value=f"{sres['label']} ({sres['sentiment_score']:.2f})")
@@ -120,14 +129,6 @@ with tab_overview:
             with st.expander('Why this prediction?'):
                 for s in adv.get('signals', []):
                     st.write(f"- {s}")
-
-            with st.expander('Per-headline sentiment details'):
-                detailed = data['detailed']
-                if isinstance(detailed, dict) and 'items' in detailed:
-                    details_df = pd.DataFrame(detailed['items'])
-                    if not details_df.empty:
-                        details_df = details_df.rename(columns={'label': 'Label', 'score': 'Score', 'headline': 'Headline'})
-                        st.dataframe(details_df[['Headline','Label','Score']], use_container_width=True, height=400)
 
             st.info('Fetching historical stock data...')
             stock_data = data.get('price')
@@ -148,8 +149,36 @@ with tab_overview:
                     margin=dict(l=10, r=10, t=30, b=10)
                 )
                 st.plotly_chart(fig, use_container_width=True)
+                # Current price and uptrend trigger/target
+                try:
+                    from main import get_current_price, compute_uptrend_levels
+                    levels = compute_uptrend_levels(stock_data)
+                    cp = levels.get('last_close', None)
+                    trigger = levels.get('trigger_price', None)
+                    target = levels.get('near_term_target', None)
+                    if cp and trigger and target:
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric('Current Price', f"{cp:.2f}")
+                        c2.metric('Uptrend Trigger', f"{trigger:.2f}")
+                        c3.metric('Near-term Target', f"{target:.2f}")
+                        st.caption('Trigger = breakout above recent 20‑day high with small buffer. Target ≈ last close + ATR.')
+                except Exception:
+                    pass
             else:
                 st.info('Price data not available for chart.')
+
+            st.write('---')
+            news_df = pd.DataFrame(data['news'], columns=['Headline'])
+            st.write('Recent News Headlines:')
+            st.dataframe(news_df, use_container_width=True)
+
+            with st.expander('Per-headline sentiment details'):
+                detailed = data['detailed']
+                if isinstance(detailed, dict) and 'items' in detailed:
+                    details_df = pd.DataFrame(detailed['items'])
+                    if not details_df.empty:
+                        details_df = details_df.rename(columns={'label': 'Label', 'score': 'Score', 'headline': 'Headline'})
+                        st.dataframe(details_df[['Headline','Label','Score']], use_container_width=True, height=400)
 
 with tab_fund:
     st.markdown('<div class="section-title">📚 Fundamental Analysis</div>', unsafe_allow_html=True)

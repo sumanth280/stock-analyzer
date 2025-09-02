@@ -323,6 +323,7 @@ def _compute_indicators(price_history: pd.DataFrame) -> pd.DataFrame:
     # SMA
     df['SMA20'] = close.rolling(20).mean()
     df['SMA50'] = close.rolling(50).mean()
+    df['SMA200'] = close.rolling(200).mean()
 
     # RSI14 (Wilder's)
     delta = close.diff()
@@ -429,6 +430,38 @@ def advanced_predict_trend(sentiment_score: float, price_history: pd.DataFrame |
     base_conf = {0: 40, 1: 60, 2: 75, 3: 85, 4: 92}.get(int(abs(score)), 95)
     confidence = int(base_conf)
     return {'direction': direction, 'confidence': confidence, 'signals': signals}
+
+
+def get_trend_labels(price_history: pd.DataFrame) -> dict:
+    """Return short-term and long-term trend labels from moving averages.
+
+    Short-term: Close vs SMA20 and SMA20 vs SMA50
+    Long-term: SMA50 vs SMA200
+    """
+    if not isinstance(price_history, pd.DataFrame) or price_history.empty:
+        return {'short_term': 'Unknown', 'long_term': 'Unknown'}
+    df = _compute_indicators(price_history)
+    last = df.iloc[-1]
+    short = 'Unknown'
+    long = 'Unknown'
+    try:
+        if pd.notna(last.get('Close')) and pd.notna(last.get('SMA20')) and pd.notna(last.get('SMA50')):
+            if last['Close'] > last['SMA20'] and last['SMA20'] > last['SMA50']:
+                short = 'Uptrend'
+            elif last['Close'] < last['SMA20'] and last['SMA20'] < last['SMA50']:
+                short = 'Downtrend'
+            else:
+                short = 'Sideways'
+        if pd.notna(last.get('SMA50')) and pd.notna(last.get('SMA200')):
+            if last['SMA50'] > last['SMA200']:
+                long = 'Uptrend'
+            elif last['SMA50'] < last['SMA200']:
+                long = 'Downtrend'
+            else:
+                long = 'Sideways'
+    except Exception:
+        pass
+    return {'short_term': short, 'long_term': long}
 
 
 def _safe_div(numerator: float | int | None, denominator: float | int | None) -> float | None:
