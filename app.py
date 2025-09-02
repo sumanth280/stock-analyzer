@@ -8,7 +8,9 @@ from main import (
     analyze_sentiment_detailed,
     predict_trend,
     advanced_predict_trend,
-    get_fundamentals
+    get_fundamentals,
+    get_financial_news_meta,
+    compute_alpha_signals
 )
 
 st.title('AI News Sentiment & Stock Predictor')
@@ -29,11 +31,15 @@ def cached_prices(t: str, p: str):
 def cached_fundamentals(t: str):
     return get_fundamentals(t)
 
+@st.cache_data(show_spinner=False, ttl=600)
+def cached_news_meta(t: str):
+    return get_financial_news_meta(t)
+
 # User input for the stock ticker
 ticker = st.text_input('Enter a stock ticker (e.g., AAPL, RELIANCE, TCS)', 'RELIANCE').upper()
 period = st.selectbox('History period', ['1mo','3mo','6mo','1y'], index=1)
 
-tab_overview, tab_fund = st.tabs(["Analysis", "Fundamentals"])
+tab_overview, tab_fund, tab_alpha = st.tabs(["Analysis", "Fundamentals", "Alpha Signals"])
 
 with tab_overview:
     if st.button('Analyze'):
@@ -150,3 +156,26 @@ with tab_fund:
                     st.dataframe(cfs, use_container_width=True)
                 else:
                     st.info('No cash flow data available.')
+
+with tab_alpha:
+    st.subheader('Alpha Signals (Unique Feature)')
+    st.caption('Opportunity score, sentiment-price divergence, risk (ATR%), and recent news heat.')
+    if st.button('Compute Alpha Signals'):
+        # Need price and sentiment aggregate
+        price = cached_prices(ticker, period)
+        if isinstance(price, str) or not isinstance(price, pd.DataFrame) or price.empty:
+            st.error('Price data unavailable.')
+        else:
+            headlines = cached_news(ticker)
+            detailed_alpha = analyze_sentiment_detailed(headlines) if headlines else {'aggregate': {'sentiment_score': 0.0}}
+            meta_news = cached_news_meta(ticker)
+            alpha = compute_alpha_signals(price, detailed_alpha['aggregate'], meta_news)
+            if isinstance(alpha, dict) and 'error' in alpha:
+                st.error(alpha['error'])
+            else:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric('Opportunity Score', alpha.get('opportunity_score', 0))
+                c2.metric('Divergence (Sentiment vs 5d Return)', alpha.get('divergence_score', 0))
+                c3.metric('Risk Index (ATR%)', alpha.get('risk_index', 0))
+                c4.metric('News Heat (48h)', alpha.get('event_heat_48h', 0))
+                st.caption('Higher Opportunity indicates stronger confluence of signals. High Risk suggests large typical daily ranges. Divergence flags a mismatch between news and price action.')

@@ -99,7 +99,7 @@ def analyze_sentiment(text_list):
         final_label = 'Negative'
     else:
         final_label = 'Neutral'
-
+        
     return {'sentiment_score': sentiment_score, 'label': final_label}
 
 
@@ -138,6 +138,149 @@ def analyze_sentiment_detailed(text_list: list[str]):
     return {
         'items': detailed,
         'aggregate': {'sentiment_score': sentiment_score, 'label': final_label}
+    }
+
+
+def get_financial_news_meta(ticker: str):
+    """Like get_financial_news, but include timestamps when available.
+
+    Returns list of dicts: { 'title': str, 'published': datetime or None }
+    """
+    from datetime import datetime, timezone
+    out: list[dict] = []
+    try:
+        resolved = _resolve_ticker_symbol(ticker)
+        stock = yf.Ticker(resolved)
+        news_items = getattr(stock, 'news', None)
+        if news_items:
+            for item in news_items:
+                title = item.get('title')
+                ts = item.get('providerPublishTime') or item.get('providerPublishTimeMs')
+                published = None
+                try:
+                    if ts:
+                        # yfinance returns seconds epoch
+                        published = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                except Exception:
+                    published = None
+                if title:
+                    out.append({'title': title.strip(), 'published': published})
+        if len(out) < 5:
+            # fallback to Google RSS
+            query = f"{ticker} stock OR shares OR results"
+            url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}+when:7d&hl=en-IN&gl=IN&ceid=IN:en"
+            feed = feedparser.parse(url)
+            for entry in feed.entries:
+                title = getattr(entry, 'title', None)
+                pub = None
+                try:
+                    if getattr(entry, 'published_parsed', None):
+                        pub = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                except Exception:
+                    pub = None
+                if title:
+                    out.append({'title': title.strip(), 'published': pub})
+        # dedupe by title
+        seen = set()
+        uniq = []
+        for it in out:
+            t = it.get('title')
+            if t and t not in seen:
+                seen.add(t)
+                uniq.append(it)
+        return uniq[:40]
+    except Exception as e:
+        return []
+
+
+def compute_alpha_signals(price_history: pd.DataFrame, sentiment_aggregate: dict, news_items: list[dict]) -> dict:
+    """Compute unique alpha-style signals: opportunity score, divergence, and risk.
+
+    - Divergence: sentiment vs 5d price return
+    - Opportunity: blend of sentiment strength, RSI extreme proximity, MACD crossover proximity
+    - Risk: ATR% of price
+    - Event heat: number of headlines last 48h
+    """
+    if not isinstance(price_history, pd.DataFrame) or price_history.empty:
+        return {'error': 'No price history'}
+
+    df = _compute_indicators(price_history)
+    last = df.iloc[-1]
+    close = float(last['Close']) if pd.notna(last.get('Close')) else None
+    atrp = None
+    if close and pd.notna(last.get('ATR14')) and last['ATR14']:
+        atrp = float(last['ATR14']) / close
+
+    # 5d return
+    five_back = df['Close'].shift(5).iloc[-1] if len(df) >= 6 else None
+    ret5 = None
+    if close and five_back and five_back != 0:
+        ret5 = (close / float(five_back)) - 1.0
+
+    sent_score = float(sentiment_aggregate.get('sentiment_score', 0.0) or 0.0)
+
+    # Divergence: positive when sentiment strong but price weak (and vice versa)
+    if ret5 is None:
+        divergence = 0.0
+    else:
+        divergence = float(sent_score) - float(ret5)
+    divergence_score = max(-1.0, min(1.0, divergence)) * 100.0
+
+    # Opportunity: components 0..100
+    comp = 0.0
+    weight = 0.0
+
+    # Sentiment strength component
+    comp += min(1.0, abs(sent_score) / 1.5) * 35.0
+    weight += 35.0
+
+    # RSI proximity to extremes: closer to 30 or 70 increases opportunity
+    rsi = float(last['RSI14']) if pd.notna(last.get('RSI14')) else None
+    if rsi is not None:
+        prox = max(0.0, (70 - rsi) / 40.0) if rsi >= 50 else max(0.0, (rsi - 30) / 40.0)
+        comp += prox * 25.0
+        weight += 25.0
+
+    # MACD cross proximity: |MACD - Signal| small -> higher opportunity (potential cross)
+    if pd.notna(last.get('MACD')) and pd.notna(last.get('MACD_SIGNAL')):
+        gap = abs(float(last['MACD']) - float(last['MACD_SIGNAL']))
+        # normalize by recent MACD range
+        macd_series = df['MACD'].dropna()
+        if len(macd_series) > 10:
+            rng = float(macd_series.tail(60).max() - macd_series.tail(60).min()) or 1.0
+        else:
+            rng = 1.0
+        inv_gap = max(0.0, 1.0 - min(1.0, gap / max(1e-6, rng)))
+        comp += inv_gap * 25.0
+        weight += 25.0
+
+    # Valuation tilt: if P/E or P/S is below median of last 4 periods -> mild bump (approx)
+    # We do not have rolling valuation; skip or set neutral
+    comp += 0.0
+    weight += 15.0  # leave some headroom to keep max at 100
+
+    opportunity_score = int(min(100.0, comp))
+
+    # Risk index from ATR%
+    risk_index = int(min(100.0, (atrp or 0.0) / 0.06 * 100.0))  # 6% ATR% ~ 100 risk
+
+    # Event heat: headlines in last 48h
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    heat = 0
+    for it in news_items or []:
+        ts = it.get('published')
+        try:
+            if ts and (now - ts) <= timedelta(hours=48):
+                heat += 1
+        except Exception:
+            continue
+
+    return {
+        'opportunity_score': opportunity_score,
+        'divergence_score': int(divergence_score),
+        'risk_index': risk_index,
+        'event_heat_48h': heat,
     }
 
 def predict_trend(sentiment_score: float, price_history: pd.DataFrame | None = None) -> str:
