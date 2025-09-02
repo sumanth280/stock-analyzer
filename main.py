@@ -1,84 +1,114 @@
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+import numpy as np
 import yfinance as yf
 from transformers import pipeline
+from functools import lru_cache
 
-# Load a pre-trained sentiment analysis model
-# Note: This is a large model, so the first run will take time to download.
-# A GPU is highly recommended for faster inference.
-sentiment_analyzer = pipeline('sentiment-analysis', model='distilbert-base-uncased-finetuned-sst-2-english')
+@lru_cache(maxsize=1)
+def _get_sentiment_pipeline():
+    """Load FinBERT tone model once and cache the pipeline."""
+    # FinBERT tone provides POSITIVE/NEGATIVE/NEUTRAL on financial text
+    return pipeline(
+        task='sentiment-analysis',
+        model='yiyanghkust/finbert-tone',
+        tokenizer='yiyanghkust/finbert-tone'
+    )
 
-def get_stock_data(ticker):
-    """
-    Fetches historical stock data for a given ticker.
-    """
+def _resolve_ticker_symbol(user_symbol: str) -> str:
+    """Try raw, NSE (.NS), and BSE (.BO) variants to find a ticker with data/news."""
+    candidates = [user_symbol.upper(), f"{user_symbol.upper()}.NS", f"{user_symbol.upper()}.BO"]
+    for symbol in candidates:
+        try:
+            t = yf.Ticker(symbol)
+            hist = t.history(period="5d")
+            if isinstance(hist, pd.DataFrame) and not hist.empty:
+                return symbol
+        except Exception:
+            pass
+    # fallback to raw input
+    return user_symbol.upper()
+
+
+def get_stock_data(ticker: str, period: str = "3mo"):
+    """Fetch historical OHLCV for a given ticker (auto-resolving NSE/BSE suffixes)."""
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1mo")
+        resolved = _resolve_ticker_symbol(ticker)
+        stock = yf.Ticker(resolved)
+        hist = stock.history(period=period, interval="1d")
+        if not isinstance(hist, pd.DataFrame) or hist.empty:
+            return f"No price data found for {resolved}."
         return hist
     except Exception as e:
         return f"Error fetching stock data: {e}"
 
-def get_financial_news(ticker):
-    """
-    Scrapes recent financial news headlines for a given ticker.
-    This is a generic example and may require adjustments for specific websites.
-    """
-    url = f"https://finance.yahoo.com/quote/{ticker}/news"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
+def get_financial_news(ticker: str):
+    """Fetch recent news titles using yfinance's Ticker.news if available."""
     try:
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        headlines = []
-        # Find news headlines based on the website's HTML structure
-        news_elements = soup.find_all('h3', class_='Mb(5px)')
-        for element in news_elements:
-            headlines.append(element.text.strip())
-        
-        return headlines
+        resolved = _resolve_ticker_symbol(ticker)
+        stock = yf.Ticker(resolved)
+        news_items = getattr(stock, 'news', None)
+        if not news_items:
+            return []
+        titles = []
+        for item in news_items:
+            title = item.get('title')
+            if title:
+                titles.append(title.strip())
+        return titles[:25]
     except Exception as e:
-        return f"Error scraping news: {e}"
+        return f"Error fetching news: {e}"
 
 def analyze_sentiment(text_list):
-    """
-    Analyzes the sentiment of a list of texts using the pre-trained model.
+    """Analyze sentiment of headlines using FinBERT. Returns aggregate score and label.
+
+    Score: sum(positive) - sum(negative). Neutral contributes 0.
     """
     if not text_list:
-        return {'sentiment_score': 0, 'label': 'Neutral'}
-    
-    results = sentiment_analyzer(text_list)
-    
-    # Calculate a combined sentiment score
-    pos_score = sum(r['score'] for r in results if r['label'] == 'POSITIVE')
-    neg_score = sum(r['score'] for r in results if r['label'] == 'NEGATIVE')
-    
-    sentiment_score = pos_score - neg_score
-    
-    if sentiment_score > 0.5:
+        return {'sentiment_score': 0.0, 'label': 'Neutral'}
+
+    nlp = _get_sentiment_pipeline()
+    results = nlp(list(text_list))
+
+    positive_score = sum(r['score'] for r in results if r['label'].upper() == 'POSITIVE')
+    negative_score = sum(r['score'] for r in results if r['label'].upper() == 'NEGATIVE')
+    sentiment_score = float(positive_score - negative_score)
+
+    if sentiment_score > 1.0:
         final_label = 'Strongly Positive'
-    elif sentiment_score > 0:
+    elif sentiment_score > 0.2:
         final_label = 'Positive'
-    elif sentiment_score < -0.5:
+    elif sentiment_score < -1.0:
         final_label = 'Strongly Negative'
-    elif sentiment_score < 0:
+    elif sentiment_score < -0.2:
         final_label = 'Negative'
     else:
         final_label = 'Neutral'
-        
+
     return {'sentiment_score': sentiment_score, 'label': final_label}
 
-def predict_trend(sentiment_score):
+def predict_trend(sentiment_score: float, price_history: pd.DataFrame | None = None) -> str:
+    """Combine news sentiment with simple momentum for a short-term direction signal.
+
+    Rules:
+    - Momentum signal = sign(Close[-1] / SMA20[-1] - 1) if enough data, else 0
+    - Sentiment signal = +1 if score>0.2, -1 if score<-0.2, else 0
+    - Sum the two signals: >0 => Up, <0 => Down, else Stable
     """
-    Predicts a short-term trend based on the sentiment score.
-    Note: This is a simplified, rule-based prediction. Real-world stock prediction
-    is highly complex and involves advanced machine learning models.
-    """
-    if sentiment_score > 0.5:
+    sentiment_signal = 1 if sentiment_score > 0.2 else (-1 if sentiment_score < -0.2 else 0)
+
+    momentum_signal = 0
+    if isinstance(price_history, pd.DataFrame) and not price_history.empty and 'Close' in price_history.columns:
+        closes = price_history['Close'].dropna()
+        if len(closes) >= 20:
+            sma20 = closes.rolling(20).mean().iloc[-1]
+            last = float(closes.iloc[-1])
+            if np.isfinite(sma20) and sma20 > 0:
+                rel = last / sma20 - 1.0
+                momentum_signal = 1 if rel > 0 else (-1 if rel < 0 else 0)
+
+    combined = sentiment_signal + momentum_signal
+    if combined > 0:
         return "Up 📈"
-    elif sentiment_score < -0.5:
+    if combined < 0:
         return "Down 📉"
-    else:
-        return "Stable ↔️"
+    return "Stable ↔️"

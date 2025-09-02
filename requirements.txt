@@ -1,0 +1,10 @@
+streamlit>=1.33.0
+plotly>=5.22.0
+pandas>=2.2.2
+numpy>=1.26.4
+yfinance>=0.2.40
+transformers>=4.41.0
+torch>=2.2.0
+tokenizers>=0.15.2
+requests>=2.32.3
+
