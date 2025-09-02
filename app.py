@@ -57,7 +57,7 @@ def cached_news_meta(t: str):
 # User inputs (moved to sidebar for a cleaner main area)
 with st.sidebar:
     st.header('⚙️ Controls')
-    ticker = st.text_input('Enter stock', 'RELIANCE').upper()
+    ticker = st.text_input('Enter stock', '', placeholder='e.g., AAPL, RELIANCE, TCS').upper()
     period = st.selectbox('History period', ['1mo','3mo','6mo','1y','3y','5y'], index=1)
     st.caption('Tip: Indian symbols auto-resolve to NSE/BSE')
 
