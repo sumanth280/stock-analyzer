@@ -10,7 +10,9 @@ from main import (
     advanced_predict_trend,
     get_fundamentals,
     get_financial_news_meta,
-    compute_alpha_signals
+    compute_alpha_signals,
+    backtest_price_strategy,
+    monte_carlo_forecast
 )
 
 st.set_page_config(page_title='AI Stock Analyzer', page_icon='📈', layout='wide')
@@ -46,6 +48,11 @@ def cached_news(t: str):
 def cached_prices(t: str, p: str):
     return get_stock_data(ticker=t, period=p)
 
+@st.cache_data(show_spinner=False, ttl=1200)
+def cached_full_history(t: str):
+    from main import get_full_history
+    return get_full_history(t)
+
 @st.cache_data(show_spinner=False, ttl=600)
 def cached_fundamentals(t: str):
     return get_fundamentals(t)
@@ -66,7 +73,7 @@ if 'store' not in st.session_state:
     st.session_state['store'] = {}
 store_key = f"{ticker}|{period}"
 
-tab_overview, tab_fund, tab_alpha = st.tabs(["Analysis", "Fundamentals", "Alpha Signals"])
+tab_overview, tab_fund, tab_alpha, tab_bt, tab_fc = st.tabs(["Analysis", "Fundamentals", "Alpha Signals", "Backtest", "Forecast"])
 
 with tab_overview:
     analyze_clicked = st.button('Analyze')
@@ -83,7 +90,17 @@ with tab_overview:
             else:
                 detailed = analyze_sentiment_detailed(news_headlines)
                 sentiment_results = detailed['aggregate']
-                stock_data_for_pred = cached_prices(ticker, period)
+                # Load full history once and slice to selected period for analysis
+                full_hist = cached_full_history(ticker)
+                if isinstance(full_hist, pd.DataFrame) and not full_hist.empty:
+                    # Map period to pandas offset
+                    period_to_days = {
+                        '1mo': 31, '3mo': 93, '6mo': 186, '1y': 366, '3y': 3*366, '5y': 5*366
+                    }
+                    days = period_to_days.get(period, 186)
+                    stock_data_for_pred = full_hist.tail(days)
+                else:
+                    stock_data_for_pred = cached_prices(ticker, period)
                 if isinstance(stock_data_for_pred, str):
                     predicted_trend = predict_trend(sentiment_results['sentiment_score'])
                     adv = {'direction': predicted_trend, 'confidence': 50, 'signals': ['Fallback: price data unavailable']}
@@ -338,3 +355,64 @@ with tab_alpha:
             st.markdown('- **Divergence**: News vs price. Positive = news is good but price hasn’t moved much yet (could catch up). Negative = price ran up but news isn’t strong (could cool off).')
             st.markdown('- **Risk Index (ATR%)**: How jumpy the stock is. Higher = bigger daily swings → more risk. Lower = calmer moves.')
             st.markdown('- **News Heat (48h)**: How much the stock is in the news recently. Bigger number = more attention/events → faster moves possible.')
+
+with tab_bt:
+    st.subheader('Backtest (Price-only Strategy)')
+    st.caption('Evaluates a simple rule: Long when Close>SMA20>SMA50 and MACD>Signal; Short when opposite. Flat otherwise. Metrics are for the selected timeframe slice.')
+    data = st.session_state['store'].get(store_key, {})
+    price = data.get('price')
+    if isinstance(price, pd.DataFrame) and not price.empty:
+        res = backtest_price_strategy(price)
+        if isinstance(res, dict) and 'error' in res:
+            st.error(res['error'])
+        else:
+            mets = res['metrics']
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric('Hit Rate', f"{mets.get('hit_rate', 0)}%")
+            c2.metric('Total Return', f"{mets.get('total_return_pct', 0)}%")
+            c3.metric('CAGR', f"{mets.get('cagr_pct', 0)}%")
+            c4.metric('Max Drawdown', f"{mets.get('max_drawdown_pct', 0)}%")
+            c5.metric('Sharpe', f"{mets.get('sharpe', 0)}")
+
+            st.write('---')
+            st.markdown('<div class="section-title">📈 Equity Curve</div>', unsafe_allow_html=True)
+            eq = res['equity']
+            import plotly.graph_objects as go
+            figbt = go.Figure()
+            figbt.add_trace(go.Scatter(x=eq.index, y=eq['Equity'], mode='lines', name='Equity'))
+            figbt.update_layout(template='plotly_white', height=320, margin=dict(l=10,r=10,t=20,b=10))
+            st.plotly_chart(figbt, use_container_width=True)
+    else:
+        st.info('Run Analysis first to load price data for backtesting.')
+
+with tab_fc:
+    st.subheader('Forecast (Monte Carlo)')
+    st.caption('Simulated future prices using GBM from historical drift/volatility. Educational, not advice.')
+    data = st.session_state['store'].get(store_key, {})
+    price = data.get('price')
+    if isinstance(price, pd.DataFrame) and not price.empty:
+        c1, c2, c3 = st.columns(3)
+        horizon = c1.selectbox('Horizon', ['3M','6M','1Y'], index=2)
+        sims = c2.slider('Simulations', 100, 2000, 500, step=100)
+        seed = c3.number_input('Random Seed (optional)', value=0)
+        days_map = {'3M': 63, '6M': 126, '1Y': 252}
+        days = days_map.get(horizon, 252)
+        res = monte_carlo_forecast(price, days_ahead=days, sims=int(sims), seed=int(seed) if seed else None)
+        if isinstance(res, dict) and 'error' in res:
+            st.error(res['error'])
+        else:
+            pct = res['percentiles']
+            import plotly.graph_objects as go
+            figf = go.Figure()
+            figf.add_trace(go.Scatter(x=pct.index, y=pct['p50'], mode='lines', name='Median (P50)'))
+            figf.add_trace(go.Scatter(x=pct.index, y=pct['p90'], mode='lines', name='P90', line=dict(width=0), showlegend=True))
+            figf.add_trace(go.Scatter(x=pct.index, y=pct['p10'], mode='lines', name='P10', fill='tonexty', line=dict(width=0)))
+            figf.update_layout(template='plotly_white', height=380, margin=dict(l=10,r=10,t=20,b=10))
+            st.plotly_chart(figf, use_container_width=True)
+
+            lp = res['params']['last_price']
+            st.metric('Current Price', f"{lp:.2f}")
+            st.metric('1Y Median (if selected)', f"{pct['p50'].iloc[-1]:.2f}")
+            st.caption('Bands show the 10th–90th percentile range across simulations.')
+    else:
+        st.info('Run Analysis first to load price data for forecasting.')

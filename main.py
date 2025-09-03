@@ -43,6 +43,19 @@ def get_stock_data(ticker: str, period: str = "3mo"):
     except Exception as e:
         return f"Error fetching stock data: {e}"
 
+
+def get_full_history(ticker: str) -> pd.DataFrame | str:
+    """Fetch maximum available daily history once for a ticker."""
+    try:
+        resolved = _resolve_ticker_symbol(ticker)
+        stock = yf.Ticker(resolved)
+        hist = stock.history(period="max", interval="1d")
+        if not isinstance(hist, pd.DataFrame) or hist.empty:
+            return f"No price data found for {resolved}."
+        return hist
+    except Exception as e:
+        return f"Error fetching full history: {e}"
+
 def get_financial_news(ticker: str):
     """Fetch recent news titles. Try yfinance news; fallback to Google News RSS."""
     try:
@@ -680,4 +693,122 @@ def compute_uptrend_levels(price_history: pd.DataFrame) -> dict:
         'last_close': last_close,
         'trigger_price': trigger,
         'near_term_target': target
+    }
+
+
+def backtest_price_strategy(price_history: pd.DataFrame) -> dict:
+    """Backtest a simple, price-only strategy using our indicators.
+
+    Rules (daily close-to-close):
+    - Long when Close>SMA20 and SMA20>SMA50 and MACD>Signal
+    - Short when Close<SMA20 and SMA20<SMA50 and MACD<Signal
+    - Else neutral (flat)
+
+    Metrics returned: hit_rate, total_return, cagr, max_drawdown, sharpe.
+    Returns dict with 'metrics' and 'equity' (DataFrame with columns: Close, Position, StrategyRet, Equity).
+    """
+    if not isinstance(price_history, pd.DataFrame) or price_history.empty:
+        return {'error': 'No price history'}
+
+    df = _compute_indicators(price_history)
+    df = df.dropna(subset=['Close']).copy()
+    if df.empty:
+        return {'error': 'No price history'}
+
+    # Build position signal
+    cond_long = (
+        (df['Close'] > df['SMA20']) & (df['SMA20'] > df['SMA50']) & (df['MACD'] > df['MACD_SIGNAL'])
+    )
+    cond_short = (
+        (df['Close'] < df['SMA20']) & (df['SMA20'] < df['SMA50']) & (df['MACD'] < df['MACD_SIGNAL'])
+    )
+    position = pd.Series(0, index=df.index, dtype=float)
+    position[cond_long.fillna(False)] = 1.0
+    position[cond_short.fillna(False)] = -1.0
+
+    # Shift position by 1 to emulate taking trade on next bar
+    df['Position'] = position.shift(1).fillna(0.0)
+
+    # Returns
+    df['CloseRet'] = df['Close'].pct_change().fillna(0.0)
+    df['StrategyRet'] = df['Position'] * df['CloseRet']
+    df['Equity'] = (1.0 + df['StrategyRet']).cumprod()
+
+    # Metrics
+    import math
+    ret_series = df['StrategyRet']
+    total_return = float(df['Equity'].iloc[-1] - 1.0)
+    # Approximate trading days per year
+    n = len(df)
+    years = max(1e-9, n / 252.0)
+    cagr = float(df['Equity'].iloc[-1] ** (1.0 / years) - 1.0) if n > 1 else 0.0
+    # Max drawdown
+    roll_max = df['Equity'].cummax()
+    drawdown = df['Equity'] / roll_max - 1.0
+    max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
+    # Sharpe (daily to annual, risk-free ~0)
+    mean_daily = float(ret_series.mean())
+    std_daily = float(ret_series.std(ddof=0))
+    sharpe = float((mean_daily / (std_daily if std_daily != 0 else math.inf)) * math.sqrt(252)) if std_daily > 0 else 0.0
+    # Hit rate: direction vs next day return
+    hits = (df['Position'] * df['CloseRet'] > 0).sum()
+    total_trades = (df['Position'].diff().abs() > 0).sum()
+    hit_rate = float(hits) / float(max(1, total_trades))
+
+    metrics = {
+        'hit_rate': round(hit_rate * 100, 1),
+        'total_return_pct': round(total_return * 100, 1),
+        'cagr_pct': round(cagr * 100, 1),
+        'max_drawdown_pct': round(max_dd * 100, 1),
+        'sharpe': round(sharpe, 2),
+        'bars': n,
+        'trades': int(total_trades),
+    }
+
+    return {'metrics': metrics, 'equity': df[['Close', 'Position', 'StrategyRet', 'Equity']]}
+
+
+def monte_carlo_forecast(price_history: pd.DataFrame, days_ahead: int = 252, sims: int = 500, seed: int | None = None) -> dict:
+    """Monte Carlo forecast using geometric Brownian motion estimated from historical log returns.
+
+    Returns dict with 'paths' (DataFrame of simulated prices), 'percentiles' (DataFrame with p10/p50/p90), and 'params'.
+    """
+    if not isinstance(price_history, pd.DataFrame) or price_history.empty:
+        return {'error': 'No price history'}
+    closes = price_history['Close'].dropna().astype(float)
+    if len(closes) < 30:
+        return {'error': 'Not enough history for forecast'}
+
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    log_rets = np.log(closes / closes.shift(1)).dropna()
+    mu = float(log_rets.mean()) * 252.0  # annualized drift
+    sigma = float(log_rets.std(ddof=0)) * np.sqrt(252.0)  # annualized vol
+    dt = 1.0 / 252.0
+    last_price = float(closes.iloc[-1])
+
+    # Simulate GBM paths
+    steps = days_ahead
+    shocks = rng.normal((mu - 0.5 * sigma * sigma) * dt, sigma * np.sqrt(dt), size=(steps, sims))
+    # cumulative log returns per path
+    cum = shocks.cumsum(axis=0)
+    paths = last_price * np.exp(cum)
+    # prepend the current price
+    paths = np.vstack([np.full((1, sims), last_price), paths])
+
+    # Build indices (business days approx)
+    import pandas as pd
+    idx = pd.RangeIndex(start=0, stop=steps + 1, step=1)
+    paths_df = pd.DataFrame(paths, index=idx)
+
+    # Percentile bands per future day
+    p10 = np.percentile(paths, 10, axis=1)
+    p50 = np.percentile(paths, 50, axis=1)
+    p90 = np.percentile(paths, 90, axis=1)
+    percentiles = pd.DataFrame({'p10': p10, 'p50': p50, 'p90': p90}, index=idx)
+
+    return {
+        'paths': paths_df,
+        'percentiles': percentiles,
+        'params': {'mu_ann': mu, 'sigma_ann': sigma, 'last_price': last_price}
     }
