@@ -130,19 +130,25 @@ with tab_overview:
                     trends = get_trend_labels(price)
                     targets = compute_trend_targets(price)
                     # Convert selected period to months label
-                    def _period_to_months_label(p: str) -> str:
+                    def _period_to_months(p: str) -> int | None:
                         if p.endswith('mo'):
                             try:
-                                return f"{int(p[:-2])}M"
+                                return int(p[:-2])
                             except Exception:
-                                return p.upper()
+                                return None
                         if p.endswith('y'):
                             try:
-                                return f"{int(p[:-1]) * 12}M"
+                                return int(p[:-1]) * 12
                             except Exception:
-                                return p.upper()
-                        return p.upper()
-                    months_label = _period_to_months_label(period)
+                                return None
+                        return None
+                    def _fmt_m(m: int | None) -> str:
+                        return f"{m}M" if isinstance(m, int) else period.upper()
+                    sel_months = _period_to_months(period)
+                    short_label = _fmt_m(sel_months)
+                    # Long-term label: a broader horizon derived from selection (4x, min 12M, max 60M)
+                    long_months = None if sel_months is None else max(12, min(60, sel_months * 4))
+                    long_label = _fmt_m(long_months)
                     c0, c1, c2 = st.columns(3)
                     c0.metric('Current Price', f"{last_close:.2f}")
 
@@ -175,8 +181,8 @@ with tab_overview:
                     # Use projected targets instead of repeating current price
                     short_price_target = targets.get('short_target', last_close)
                     long_price_target = targets.get('long_target', last_close)
-                    c1.markdown(_trend_view(f'Short-term Target ({months_label})', float(short_price_target), trends.get('short_term', 'Unknown')), unsafe_allow_html=True)
-                    c2.markdown(_trend_view(f'Long-term Target ({months_label})', float(long_price_target), trends.get('long_term', 'Unknown')), unsafe_allow_html=True)
+                    c1.markdown(_trend_view(f'Short-term Target ({short_label})', float(short_price_target), trends.get('short_term', 'Unknown')), unsafe_allow_html=True)
+                    c2.markdown(_trend_view(f'Long-term Target ({long_label})', float(long_price_target), trends.get('long_term', 'Unknown')), unsafe_allow_html=True)
                 except Exception:
                     pass
             else:
