@@ -113,8 +113,35 @@ with tab_overview:
                     trends = get_trend_labels(price)
                     c0, c1, c2 = st.columns(3)
                     c0.metric('Current Price', f"{last_close:.2f}")
-                    c1.metric('Short-term Trend', f"{trends.get('short_term', 'Unknown')} @ {last_close:.2f}")
-                    c2.metric('Long-term Trend', f"{trends.get('long_term', 'Unknown')} @ {last_close:.2f}")
+
+                    def _trend_view(label: str, price_val: float, trend_label: str):
+                        t = (trend_label or 'Unknown').lower()
+                        if 'up' in t:
+                            arrow = '▲'
+                            color = '#16a34a'
+                            text = 'Uptrend'
+                        elif 'down' in t:
+                            arrow = '▼'
+                            color = '#dc2626'
+                            text = 'Downtrend'
+                        elif 'side' in t:
+                            arrow = '↔'
+                            color = '#6b7280'
+                            text = 'Sideways'
+                        else:
+                            arrow = '↔'
+                            color = '#6b7280'
+                            text = 'Unknown'
+                        html = f"""
+                        <div class='metric-small'>
+                            <div class='metric-label'>{label}</div>
+                            <div class='metric-value'><span style='color:{color};margin-right:6px'>{arrow}</span> {price_val:.2f} <span class='subtle' style='margin-left:6px'>{text}</span></div>
+                        </div>
+                        """
+                        return html
+
+                    c1.markdown(_trend_view('Short-term Trend', last_close, trends.get('short_term', 'Unknown')), unsafe_allow_html=True)
+                    c2.markdown(_trend_view('Long-term Trend', last_close, trends.get('long_term', 'Unknown')), unsafe_allow_html=True)
                 except Exception:
                     pass
             else:
