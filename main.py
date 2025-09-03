@@ -768,7 +768,7 @@ def backtest_price_strategy(price_history: pd.DataFrame) -> dict:
     return {'metrics': metrics, 'equity': df[['Close', 'Position', 'StrategyRet', 'Equity']]}
 
 
-def monte_carlo_forecast(price_history: pd.DataFrame, days_ahead: int = 252, sims: int = 500, seed: int | None = None) -> dict:
+def monte_carlo_forecast(price_history: pd.DataFrame, days_ahead: int = 252, sims: int = 500, seed: int | None = None, override_mu_ann: float | None = None, override_sigma_ann: float | None = None) -> dict:
     """Monte Carlo forecast using geometric Brownian motion estimated from historical log returns.
 
     Returns dict with 'paths' (DataFrame of simulated prices), 'percentiles' (DataFrame with p10/p50/p90), and 'params'.
@@ -784,6 +784,10 @@ def monte_carlo_forecast(price_history: pd.DataFrame, days_ahead: int = 252, sim
     log_rets = np.log(closes / closes.shift(1)).dropna()
     mu = float(log_rets.mean()) * 252.0  # annualized drift
     sigma = float(log_rets.std(ddof=0)) * np.sqrt(252.0)  # annualized vol
+    if override_mu_ann is not None:
+        mu = float(override_mu_ann)
+    if override_sigma_ann is not None:
+        sigma = float(override_sigma_ann)
     dt = 1.0 / 252.0
     last_price = float(closes.iloc[-1])
 

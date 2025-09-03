@@ -395,9 +395,20 @@ with tab_fc:
         horizon = c1.selectbox('Horizon', ['3M','6M','1Y'], index=2)
         sims = c2.slider('Simulations', 100, 2000, 500, step=100)
         seed = c3.number_input('Random Seed (optional)', value=0)
+        with st.expander('Advanced (optional): Drift/Vol overrides'):
+            colA, colB = st.columns(2)
+            mu_override = colA.number_input('Annualized Drift μ (e.g., 0.10 = 10%)', value=None, step=0.01, format='%.4f')
+            sigma_override = colB.number_input('Annualized Volatility σ (e.g., 0.25 = 25%)', value=None, step=0.01, format='%.4f')
         days_map = {'3M': 63, '6M': 126, '1Y': 252}
         days = days_map.get(horizon, 252)
-        res = monte_carlo_forecast(price, days_ahead=days, sims=int(sims), seed=int(seed) if seed else None)
+        res = monte_carlo_forecast(
+            price,
+            days_ahead=days,
+            sims=int(sims),
+            seed=int(seed) if seed else None,
+            override_mu_ann=mu_override,
+            override_sigma_ann=sigma_override
+        )
         if isinstance(res, dict) and 'error' in res:
             st.error(res['error'])
         else:
@@ -412,7 +423,23 @@ with tab_fc:
 
             lp = res['params']['last_price']
             st.metric('Current Price', f"{lp:.2f}")
-            st.metric('1Y Median (if selected)', f"{pct['p50'].iloc[-1]:.2f}")
+            st.metric('Horizon Median', f"{pct['p50'].iloc[-1]:.2f}")
             st.caption('Bands show the 10th–90th percentile range across simulations.')
+
+            # CSV downloads
+            csv_col1, csv_col2 = st.columns(2)
+            csv_col1.download_button(
+                label='Download Percentiles CSV',
+                data=pct.to_csv().encode('utf-8'),
+                file_name=f'{ticker}_{horizon}_percentiles.csv',
+                mime='text/csv'
+            )
+            paths_df = res['paths']
+            csv_col2.download_button(
+                label='Download Paths CSV',
+                data=paths_df.to_csv().encode('utf-8'),
+                file_name=f'{ticker}_{horizon}_paths.csv',
+                mime='text/csv'
+            )
     else:
         st.info('Run Analysis first to load price data for forecasting.')
