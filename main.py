@@ -465,6 +465,17 @@ def get_trend_labels(price_history: pd.DataFrame) -> dict:
                 short = 'Downtrend'
             else:
                 short = 'Sideways'
+        else:
+            # Ultimate short-term fallback: recent 3-day change in Close
+            closes = df['Close'].dropna()
+            if len(closes) >= 3:
+                delta3 = float(closes.iloc[-1] - closes.iloc[-3])
+                if delta3 > 0:
+                    short = 'Uptrend'
+                elif delta3 < 0:
+                    short = 'Downtrend'
+                else:
+                    short = 'Sideways'
 
         # Long-term preference: 50 vs 200, else 50 vs 100, else slope of 50
         sma50 = last.get('SMA50')
@@ -496,19 +507,23 @@ def get_trend_labels(price_history: pd.DataFrame) -> dict:
                 else:
                     long = 'Sideways'
         else:
-            # Ultimate fallback for very short histories: Close vs SMA20 slope if available
-            if 'SMA20' in df.columns:
-                sma20_series = df['SMA20'].dropna().tail(6)
-                if len(sma20_series) >= 2:
-                    slope20 = float(sma20_series.iloc[-1] - sma20_series.iloc[0])
-                    if slope20 > 0:
-                        long = 'Uptrend'
-                    elif slope20 < 0:
-                        long = 'Downtrend'
-                    else:
-                        long = 'Sideways'
+            # Ultimate long-term fallback: slope of Close over last up to 10 days
+            closes = df['Close'].dropna().tail(10)
+            if len(closes) >= 2:
+                slope_close = float(closes.iloc[-1] - closes.iloc[0])
+                if slope_close > 0:
+                    long = 'Uptrend'
+                elif slope_close < 0:
+                    long = 'Downtrend'
+                else:
+                    long = 'Sideways'
     except Exception:
         pass
+    # Ensure we never return 'Unknown'
+    if short == 'Unknown':
+        short = 'Sideways'
+    if long == 'Unknown':
+        long = 'Sideways'
     return {'short_term': short, 'long_term': long}
 
 
