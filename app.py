@@ -113,8 +113,18 @@ with tab_overview:
                     trends = get_trend_labels(price)
                     c0, c1, c2 = st.columns(3)
                     c0.metric('Current Price', f"{last_close:.2f}")
-                    c1.metric('Short-term Trend', trends.get('short_term', 'Unknown'))
-                    c2.metric('Long-term Trend', trends.get('long_term', 'Unknown'))
+                    c1.metric('Short-term Trend', f"{trends.get('short_term', 'Unknown')} @ {last_close:.2f}")
+                    c2.metric('Long-term Trend', f"{trends.get('long_term', 'Unknown')} @ {last_close:.2f}")
+                except Exception:
+                    pass
+            else:
+                # Fallback: try to display current price even if history missing
+                try:
+                    from main import get_current_price
+                    cp = get_current_price(ticker)
+                    if cp is not None:
+                        c0, _, _ = st.columns(3)
+                        c0.metric('Current Price', f"{cp:.2f}")
                 except Exception:
                     pass
 
@@ -166,6 +176,15 @@ with tab_overview:
                     pass
             else:
                 st.info('Price data not available for chart.')
+                # Show current price even when we cannot plot the chart
+                try:
+                    from main import get_current_price
+                    cp = get_current_price(ticker)
+                    if cp is not None:
+                        c1, _, _ = st.columns(3)
+                        c1.metric('Current Price', f"{cp:.2f}")
+                except Exception:
+                    pass
 
             st.write('---')
             news_df = pd.DataFrame(data['news'], columns=['Headline'])
