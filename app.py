@@ -125,9 +125,10 @@ with tab_overview:
             price = data.get('price')
             if isinstance(price, pd.DataFrame) and not price.empty:
                 try:
-                    from main import get_current_price, get_trend_labels
+                    from main import get_current_price, get_trend_labels, compute_trend_targets
                     last_close = float(price['Close'].iloc[-1])
                     trends = get_trend_labels(price)
+                    targets = compute_trend_targets(price)
                     c0, c1, c2 = st.columns(3)
                     c0.metric('Current Price', f"{last_close:.2f}")
 
@@ -157,8 +158,11 @@ with tab_overview:
                         """
                         return html
 
-                    c1.markdown(_trend_view('Short-term Trend', last_close, trends.get('short_term', 'Unknown')), unsafe_allow_html=True)
-                    c2.markdown(_trend_view('Long-term Trend', last_close, trends.get('long_term', 'Unknown')), unsafe_allow_html=True)
+                    # Use projected targets instead of repeating current price
+                    short_price_target = targets.get('short_target', last_close)
+                    long_price_target = targets.get('long_target', last_close)
+                    c1.markdown(_trend_view('Short-term Target', float(short_price_target), trends.get('short_term', 'Unknown')), unsafe_allow_html=True)
+                    c2.markdown(_trend_view('Long-term Target', float(long_price_target), trends.get('long_term', 'Unknown')), unsafe_allow_html=True)
                 except Exception:
                     pass
             else:

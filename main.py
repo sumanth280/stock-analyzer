@@ -816,3 +816,51 @@ def monte_carlo_forecast(price_history: pd.DataFrame, days_ahead: int = 252, sim
         'percentiles': percentiles,
         'params': {'mu_ann': mu, 'sigma_ann': sigma, 'last_price': last_price}
     }
+
+
+def compute_trend_targets(price_history: pd.DataFrame) -> dict:
+    """Estimate short- and long-term target prices based on current trend and ATR.
+
+    - Short-term: if uptrend, use compute_uptrend_levels near_term_target; if downtrend, last_close - ATR14.
+                  if sideways, last_close.
+    - Long-term:  if uptrend, last_close + 3*ATR14; if downtrend, last_close - 3*ATR14; else last_close.
+    Returns dict: { 'last_close': float, 'short_target': float, 'long_target': float }
+    """
+    if not isinstance(price_history, pd.DataFrame) or price_history.empty:
+        return {'error': 'No price history'}
+    df = _compute_indicators(price_history)
+    last = df.iloc[-1]
+    if pd.isna(last.get('Close')):
+        return {'error': 'No price history'}
+    last_close = float(last['Close'])
+
+    # ATR
+    atr = None
+    if 'ATR14' in df.columns and pd.notna(last.get('ATR14')):
+        atr = float(last['ATR14'])
+
+    # Determine trends
+    labels = get_trend_labels(price_history)
+    short_lbl = (labels.get('short_term') or '').lower()
+    long_lbl = (labels.get('long_term') or '').lower()
+
+    # Short-term target
+    short_target = last_close
+    try:
+        if 'up' in short_lbl:
+            up = compute_uptrend_levels(price_history)
+            short_target = float(up.get('near_term_target', last_close))
+        elif 'down' in short_lbl:
+            short_target = last_close - (atr if atr is not None else 0.03 * last_close)
+    except Exception:
+        pass
+
+    # Long-term target
+    long_target = last_close
+    step = (atr if atr is not None else 0.03 * last_close)
+    if 'up' in long_lbl:
+        long_target = last_close + 3.0 * step
+    elif 'down' in long_lbl:
+        long_target = last_close - 3.0 * step
+
+    return {'last_close': last_close, 'short_target': float(short_target), 'long_target': float(long_target)}
