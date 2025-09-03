@@ -801,7 +801,6 @@ def monte_carlo_forecast(price_history: pd.DataFrame, days_ahead: int = 252, sim
     paths = np.vstack([np.full((1, sims), last_price), paths])
 
     # Build indices (business days approx)
-    import pandas as pd
     idx = pd.RangeIndex(start=0, stop=steps + 1, step=1)
     paths_df = pd.DataFrame(paths, index=idx)
 
