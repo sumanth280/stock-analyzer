@@ -129,6 +129,20 @@ with tab_overview:
                     last_close = float(price['Close'].iloc[-1])
                     trends = get_trend_labels(price)
                     targets = compute_trend_targets(price)
+                    # Convert selected period to months label
+                    def _period_to_months_label(p: str) -> str:
+                        if p.endswith('mo'):
+                            try:
+                                return f"{int(p[:-2])}M"
+                            except Exception:
+                                return p.upper()
+                        if p.endswith('y'):
+                            try:
+                                return f"{int(p[:-1]) * 12}M"
+                            except Exception:
+                                return p.upper()
+                        return p.upper()
+                    months_label = _period_to_months_label(period)
                     c0, c1, c2 = st.columns(3)
                     c0.metric('Current Price', f"{last_close:.2f}")
 
@@ -161,8 +175,8 @@ with tab_overview:
                     # Use projected targets instead of repeating current price
                     short_price_target = targets.get('short_target', last_close)
                     long_price_target = targets.get('long_target', last_close)
-                    c1.markdown(_trend_view('Short-term Target', float(short_price_target), trends.get('short_term', 'Unknown')), unsafe_allow_html=True)
-                    c2.markdown(_trend_view('Long-term Target', float(long_price_target), trends.get('long_term', 'Unknown')), unsafe_allow_html=True)
+                    c1.markdown(_trend_view(f'Short-term Target ({months_label})', float(short_price_target), trends.get('short_term', 'Unknown')), unsafe_allow_html=True)
+                    c2.markdown(_trend_view(f'Long-term Target ({months_label})', float(long_price_target), trends.get('long_term', 'Unknown')), unsafe_allow_html=True)
                 except Exception:
                     pass
             else:
