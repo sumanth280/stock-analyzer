@@ -446,11 +446,22 @@ def get_trend_labels(price_history: pd.DataFrame) -> dict:
     short = 'Unknown'
     long = 'Unknown'
     try:
-        # Short-term based on 20/50
-        if pd.notna(last.get('Close')) and pd.notna(last.get('SMA20')) and pd.notna(last.get('SMA50')):
+        # Short-term: prefer 20/50 structure; fallback to Close vs SMA20 when SMA50 missing
+        has_close = pd.notna(last.get('Close'))
+        has_sma20 = pd.notna(last.get('SMA20'))
+        has_sma50 = pd.notna(last.get('SMA50'))
+        if has_close and has_sma20 and has_sma50:
             if last['Close'] > last['SMA20'] and last['SMA20'] > last['SMA50']:
                 short = 'Uptrend'
             elif last['Close'] < last['SMA20'] and last['SMA20'] < last['SMA50']:
+                short = 'Downtrend'
+            else:
+                short = 'Sideways'
+        elif has_close and has_sma20:
+            # Fallback when SMA50 unavailable (short history)
+            if last['Close'] > last['SMA20']:
+                short = 'Uptrend'
+            elif last['Close'] < last['SMA20']:
                 short = 'Downtrend'
             else:
                 short = 'Sideways'
@@ -484,6 +495,18 @@ def get_trend_labels(price_history: pd.DataFrame) -> dict:
                     long = 'Downtrend'
                 else:
                     long = 'Sideways'
+        else:
+            # Ultimate fallback for very short histories: Close vs SMA20 slope if available
+            if 'SMA20' in df.columns:
+                sma20_series = df['SMA20'].dropna().tail(6)
+                if len(sma20_series) >= 2:
+                    slope20 = float(sma20_series.iloc[-1] - sma20_series.iloc[0])
+                    if slope20 > 0:
+                        long = 'Uptrend'
+                    elif slope20 < 0:
+                        long = 'Downtrend'
+                    else:
+                        long = 'Sideways'
     except Exception:
         pass
     return {'short_term': short, 'long_term': long}
